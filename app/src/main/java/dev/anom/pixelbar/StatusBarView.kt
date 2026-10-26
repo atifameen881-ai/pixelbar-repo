@@ -1,32 +1,78 @@
 package dev.anom.pixelbar
 
+import android.animation.ValueAnimator
 import android.content.Context
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.format.DateFormat
 import android.view.View
+import androidx.core.graphics.ColorUtils
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
 
-/** Pixel-style status bar, drawn from scratch with Canvas. No assets, no emoji. */
+/**
+ * Pixel-style status bar drawn with Canvas.
+ * Every size is derived from the real status bar height (1 unit = barHeight / 24),
+ * so it scales with the device instead of using hard-coded dp.
+ */
 class StatusBarView(context: Context) : View(context) {
     private var config = Config()
     private var status = Status()
-    private val d = resources.displayMetrics.density
+    private var notifs: List<Bitmap> = emptyList()
+    private var env = Env()
+    private var adaptive: Int? = null
+    private var anim: ValueAnimator? = null
+
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val bp = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val path = Path()
     private val rect = RectF()
+    private val dst = RectF()
+    private val tb = Rect()
 
-    fun update(c: Config, s: Status) {
-        config = c
-        status = s
+    private val faceClock: Typeface = loadFace(520)
+    private val faceBold: Typeface = loadFace(720)
+
+    private fun loadFace(weight: Int): Typeface {
+        val t = try {
+            Typeface.Builder(context.assets, "fonts/Figtree.ttf")
+                .setFontVariationSettings("'wght' $weight")
+                .build()
+        } catch (_: Exception) {
+            null
+        }
+        return t ?: Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    }
+
+    fun update(c: Config, s: Status, n: List<Bitmap>, e: Env) {
+        config = c; status = s; notifs = n; env = e
         invalidate()
+    }
+
+    /** Colour sampled from the app below the bar. null = fall back to system light/dark. */
+    fun setAdaptiveColor(target: Int?) {
+        anim?.cancel()
+        if (target == null) { adaptive = null; invalidate(); return }
+        val from = adaptive ?: target
+        if (from == target) { adaptive = target; invalidate(); return }
+        anim = ValueAnimator.ofArgb(from, target).apply {
+            duration = 180
+            addUpdateListener { adaptive = it.animatedValue as Int; invalidate() }
+            start()
+        }
     }
 
     private fun paint(
@@ -45,34 +91,50 @@ class StatusBarView(context: Context) : View(context) {
         strokeCap = Paint.Cap.ROUND
     }
 
+    private fun onColor(bg: Int): Int =
+        if (ColorUtils.calculateLuminance(bg) > 0.5) 0xFF202124.toInt() else Color.WHITE
+
     override fun onDraw(c: Canvas) {
-        val night = when (config.theme) {
-            1 -> false
-            2 -> true
-            else -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-                    Configuration.UI_MODE_NIGHT_YES
+        val sysNight = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+        val sysBg = if (sysNight) Color.BLACK else Color.WHITE
+        val bg = when (config.bgMode) {
+            2 -> Color.WHITE
+            3 -> Color.BLACK
+            1 -> sysBg
+            else -> adaptive ?: sysBg
         }
-        val bg = if (night) Color.BLACK else Color.WHITE
-        val fg = if (night) Color.WHITE else 0xFF1F1F1F.toInt()
+        val fg = onColor(bg)
         c.drawColor(bg)
 
-        val u = d * config.iconScale
-        val gap = config.spacing * d
-        val pad = config.sidePadding * d
-        val cy = height / 2f
+        val h = height.toFloat()
+        val unit = h / 24f
+        val u = unit * config.iconScale
+        val gap = 6.5f * u * config.spacing
+        val minPad = config.sidePadding * unit
+        val startPad = max(minPad, env.startInset)
+        val endPad = max(minPad, env.endInset)
+        val cy = h / 2f
 
-        drawClock(c, pad, cy, u, fg)
-
-        var x = width - pad
+        // right group, drawn right-to-left
+        var x = width - endPad
         x = drawBattery(c, x, cy, u, fg, bg)
         x -= gap
         x = drawSignal(c, x, cy, u, fg)
         if (status.wifi >= 0) { x -= gap; x = drawWifi(c, x, cy, u, fg, bg) }
         if (status.dnd) { x -= gap; x = drawDnd(c, x, cy, u, fg) }
         if (status.alarm) { x -= gap; x = drawAlarm(c, x, cy, u, fg) }
+
+        // left group: clock + notification icons, never into the notch or the right group
+        var limit = x - gap
+        if (env.cutL >= 0f) limit = min(limit, env.cutL - 3f * u)
+        val clockEnd = drawClock(c, startPad, cy, u, fg)
+        if (config.showNotifs && notifs.isNotEmpty()) {
+            drawNotifs(c, clockEnd + 5f * u, cy, u, fg, limit)
+        }
     }
 
-    private fun drawClock(c: Canvas, x: Float, cy: Float, u: Float, fg: Int) {
+    private fun drawClock(c: Canvas, x: Float, cy: Float, u: Float, fg: Int): Float {
         val is24 = when (config.clockFormat) {
             1 -> false
             2 -> true
@@ -81,19 +143,48 @@ class StatusBarView(context: Context) : View(context) {
         val txt = SimpleDateFormat(if (is24) "HH:mm" else "h:mm", Locale.getDefault())
             .format(Date(status.now))
         paint(fg)
-        p.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        p.textSize = 15f * u
-        val fm = p.fontMetrics
-        c.drawText(txt, x, cy - (fm.ascent + fm.descent) / 2f, p)
+        p.typeface = faceClock
+        p.textSize = 14.5f * u
+        p.getTextBounds("0", 0, 1, tb)
+        val base = cy - tb.exactCenterY()   // centre the digits, not the font box
+        c.drawText(txt, x, base, p)
+        return x + p.measureText(txt)
+    }
+
+    private fun drawNotifs(c: Canvas, startX: Float, cy: Float, u: Float, fg: Int, limit: Float) {
+        val sz = 14f * u
+        val g = 3.5f * u
+        val step = sz + g
+        val n = notifs.size
+        val maxFit = floor((limit - startX + g) / step).toInt()
+        if (maxFit <= 0) return
+        val show = if (n <= maxFit) n else max(maxFit - 1, 0)
+        bp.colorFilter = PorterDuffColorFilter(fg, PorterDuff.Mode.SRC_IN)
+        var x = startX
+        for (i in 0 until show) {
+            dst.set(x, cy - sz / 2, x + sz, cy + sz / 2)
+            c.drawBitmap(notifs[i], null, dst, bp)
+            x += step
+        }
+        if (n > show) c.drawCircle(x + 2.5f * u, cy, 2f * u, paint(fg))
     }
 
     private fun drawBattery(c: Canvas, right: Float, cy: Float, u: Float, fg: Int, bg: Int): Float {
         val showPct = config.showPercent
-        val bw = (if (showPct) 27f else 22f) * u
-        val bh = (if (showPct) 14f else 11.5f) * u
-        val capW = 1.6f * u
-        val capH = 4.5f * u
-        val capGap = 0.8f * u
+        val bh = (if (showPct) 15.5f else 12f) * u
+        val capW = 1.8f * u
+        val capH = 5f * u
+        val capGap = 0.9f * u
+        val txtSize = 11.5f * u
+        var bw = 22f * u
+        if (showPct) {
+            paint(fg)
+            p.typeface = faceBold
+            p.textSize = txtSize
+            bw = p.measureText("100") + 6f * u   // always sized for 3 digits so it never jumps
+        }
+        bw = max(bw, bh * 1.5f)
+
         val bodyRight = right - capW - capGap
         val left = bodyRight - bw
         val top = cy - bh / 2
@@ -120,16 +211,16 @@ class StatusBarView(context: Context) : View(context) {
         c.clipPath(path)
         c.drawRect(left, top, fillRight, bottom, paint(fillColor))
         if (showPct) {
-            paint(bg)
-            p.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            p.textSize = 9.5f * u
+            paint(fg)
+            p.typeface = faceBold
+            p.textSize = txtSize
             p.textAlign = Paint.Align.CENTER
-            val fm = p.fontMetrics
-            val by = cy - (fm.ascent + fm.descent) / 2f
+            p.getTextBounds("0", 0, 1, tb)
+            val by = cy - tb.exactCenterY()
             val tx = left + bw / 2
             val s = pct.toString()
             c.save(); c.clipRect(left, top, fillRight, bottom)
-            p.color = bg; c.drawText(s, tx, by, p); c.restore()
+            p.color = onColor(fillColor); c.drawText(s, tx, by, p); c.restore()
             c.save(); c.clipRect(fillRight, top, bodyRight, bottom)
             p.color = fg; c.drawText(s, tx, by, p); c.restore()
         }
@@ -138,7 +229,7 @@ class StatusBarView(context: Context) : View(context) {
         var l = left
         if (status.charging) {
             if (showPct) {
-                val bs = 10f * u
+                val bs = 11f * u
                 drawBolt(c, left - 1.5f * u - bs * 0.3f, cy, bs, fg, bg, false)
                 l = left - 1.5f * u - bs * 0.6f
             } else {
@@ -157,14 +248,14 @@ class StatusBarView(context: Context) : View(context) {
         path.lineTo(cx + 0.30f * s, cy - 0.10f * s)
         path.lineTo(cx + 0.02f * s, cy - 0.10f * s)
         path.close()
-        if (halo) c.drawPath(path, paint(bg, 255, Paint.Style.FILL_AND_STROKE, 1.4f * d))
+        if (halo) c.drawPath(path, paint(bg, 255, Paint.Style.FILL_AND_STROKE, 0.9f * s * 0.2f))
         c.drawPath(path, paint(fg))
     }
 
     private fun drawSignal(c: Canvas, right: Float, cy: Float, u: Float, fg: Int): Float {
-        val w = 13f * u
-        val h = 12f * u
-        val sw = 1.6f * u
+        val w = 13.5f * u
+        val h = 12.5f * u
+        val sw = 1.7f * u
         val left = right - w
         val top = cy - h / 2
         val bottom = cy + h / 2
@@ -185,7 +276,7 @@ class StatusBarView(context: Context) : View(context) {
     }
 
     private fun drawWifi(c: Canvas, right: Float, cy: Float, u: Float, fg: Int, bg: Int): Float {
-        val rad = 11f * u
+        val rad = 11.5f * u
         val halfW = rad * 0.7071f
         val left = right - 2 * halfW
         val cx = left + halfW
@@ -218,8 +309,8 @@ class StatusBarView(context: Context) : View(context) {
     }
 
     private fun drawDnd(c: Canvas, right: Float, cy: Float, u: Float, fg: Int): Float {
-        val r = 5f * u
-        val sw = 1.5f * u
+        val r = 5.5f * u
+        val sw = 1.6f * u
         val cx = right - r
         c.drawCircle(cx, cy, r - sw / 2, paint(fg, 255, Paint.Style.STROKE, sw))
         c.drawLine(cx - r * 0.5f, cy, cx + r * 0.5f, cy, paint(fg, 255, Paint.Style.STROKE, sw))
@@ -227,8 +318,8 @@ class StatusBarView(context: Context) : View(context) {
     }
 
     private fun drawAlarm(c: Canvas, right: Float, cy: Float, u: Float, fg: Int): Float {
-        val r = 5f * u
-        val sw = 1.5f * u
+        val r = 5.5f * u
+        val sw = 1.6f * u
         val cx = right - r
         c.drawCircle(cx, cy, r - sw / 2, paint(fg, 255, Paint.Style.STROKE, sw))
         path.reset()

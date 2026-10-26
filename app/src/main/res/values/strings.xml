@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">Pixel Bar</string>
-    <string name="a11y_description">Draws a Pixel-style status bar over the system status bar. Android only allows an app to draw above the status bar through an accessibility service. This app does not read your screen, keystrokes or notifications.</string>
+    <string name="a11y_description">Draws a Pixel-style status bar over the system status bar. Android only allows an app to draw above the status bar through an accessibility service. The screenshot permission is used only to read one row of pixels just below the bar so the bar can match the app colour. Nothing is saved or sent anywhere. This app has no internet permission.</string>
 </resources>

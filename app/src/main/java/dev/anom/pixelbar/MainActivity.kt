@@ -13,6 +13,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,7 +36,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -51,6 +51,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
@@ -79,21 +80,26 @@ private fun a11yOn(ctx: Context): Boolean {
 private fun phoneOk(ctx: Context) =
     ctx.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
 
+private fun notifOk(ctx: Context) =
+    NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(ctx.packageName)
+
 @Composable
 fun Screen() {
     val ctx = LocalContext.current
     val cfg by Prefs.config.collectAsState()
+    val notifs by NotifStore.icons.collectAsState()
     val monitor = remember { StatusMonitor(ctx) }
     DisposableEffect(Unit) { monitor.start(); onDispose { monitor.stop() } }
     val status by monitor.state.collectAsState()
 
     var a11y by remember { mutableStateOf(a11yOn(ctx)) }
     var phone by remember { mutableStateOf(phoneOk(ctx)) }
+    var notifAccess by remember { mutableStateOf(notifOk(ctx)) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val o = LifecycleEventObserver { _, e ->
             if (e == Lifecycle.Event.ON_RESUME) {
-                a11y = a11yOn(ctx); phone = phoneOk(ctx); monitor.refresh()
+                a11y = a11yOn(ctx); phone = phoneOk(ctx); notifAccess = notifOk(ctx); monitor.refresh()
             }
         }
         lifecycle.addObserver(o)
@@ -110,17 +116,22 @@ fun Screen() {
         ) {
             Text("Pixel Bar", style = MaterialTheme.typography.headlineMedium)
             Text("Live preview", style = MaterialTheme.typography.titleSmall)
-            val hDp = with(LocalDensity.current) { ctx.statusBarHeightPx().toDp() }
+            val barPx = ctx.statusBarHeightPx()
+            val hDp = with(LocalDensity.current) { barPx.toDp() }
             AndroidView(
                 factory = { StatusBarView(it) },
-                update = { it.update(cfg, status) },
+                update = { it.update(cfg, status, notifs, Env(barH = barPx)) },
                 modifier = Modifier.fillMaxWidth().height(hDp).clip(RoundedCornerShape(8.dp))
+            )
+            Text(
+                "The preview can't sample your apps, so Adaptive shows system light/dark here. On the real bar it matches the app underneath.",
+                style = MaterialTheme.typography.bodySmall
             )
 
             if (!a11y) {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Accessibility service is OFF. Android only lets a normal app draw above the system status bar through an accessibility service. This app does not read your screen, taps or notifications; it only draws the bar. Find \"Pixel Bar\" under Installed apps and turn it on. If the toggle is greyed out: App info > three dots > Allow restricted settings.")
+                        Text("1. Accessibility service is OFF. It's the only no-root way to draw above the system status bar. The screenshot permission is used only to read one row of pixels below the bar for the adaptive colour; nothing is saved or sent. If the toggle is greyed out: App info > three dots > Allow restricted settings.")
                         Button(onClick = { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
                             Text("Open accessibility settings")
                         }
@@ -130,9 +141,19 @@ fun Screen() {
             if (!phone) {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Phone state permission is needed to read cellular signal strength. Without it the signal icon stays empty. Nothing is stored or sent anywhere.")
+                        Text("2. Phone state permission is needed to read cellular signal strength. Without it the signal icon stays empty.")
                         Button(onClick = { launcher.launch(Manifest.permission.READ_PHONE_STATE) }) {
                             Text("Grant phone state")
+                        }
+                    }
+                }
+            }
+            if (!notifAccess) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("3. Notification access shows your notification icons next to the clock, because this bar covers the stock one. It only reads each notification's small icon. Nothing is stored or sent. Same restricted-settings trick if it's greyed out.")
+                        Button(onClick = { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) {
+                            Text("Open notification access")
                         }
                     }
                 }
@@ -143,14 +164,18 @@ fun Screen() {
                 Switch(checked = cfg.enabled, onCheckedChange = { on -> Prefs.update { it.copy(enabled = on) } })
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Show battery percentage", Modifier.weight(1f))
+                Text("Battery percentage inside pill", Modifier.weight(1f))
                 Switch(checked = cfg.showPercent, onCheckedChange = { on -> Prefs.update { it.copy(showPercent = on) } })
             }
-            ChipRow("Colors", listOf("Auto", "Light", "Dark"), cfg.theme) { i -> Prefs.update { it.copy(theme = i) } }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Notification icons", Modifier.weight(1f))
+                Switch(checked = cfg.showNotifs, onCheckedChange = { on -> Prefs.update { it.copy(showNotifs = on) } })
+            }
+            ChipRow("Background", listOf("Adaptive", "System", "Light", "Dark"), cfg.bgMode) { i -> Prefs.update { it.copy(bgMode = i) } }
             ChipRow("Clock", listOf("System", "12h", "24h"), cfg.clockFormat) { i -> Prefs.update { it.copy(clockFormat = i) } }
-            SliderRow("Icon size", cfg.iconScale, 0.8f..1.3f) { v -> Prefs.update { it.copy(iconScale = v) } }
-            SliderRow("Icon spacing", cfg.spacing, 4f..14f) { v -> Prefs.update { it.copy(spacing = v) } }
-            SliderRow("Side padding", cfg.sidePadding, 8f..28f) { v -> Prefs.update { it.copy(sidePadding = v) } }
+            SliderRow("Icon size (auto-scaled to your bar)", cfg.iconScale, 0.7f..1.4f) { v -> Prefs.update { it.copy(iconScale = v) } }
+            SliderRow("Icon spacing", cfg.spacing, 0.5f..2f) { v -> Prefs.update { it.copy(spacing = v) } }
+            SliderRow("Side padding", cfg.sidePadding, 2f..30f) { v -> Prefs.update { it.copy(sidePadding = v) } }
 
             Spacer(Modifier.height(8.dp))
             Text(

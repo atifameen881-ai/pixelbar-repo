@@ -1,11 +1,5 @@
-# Pixel Bar (uncompiled, untested)
+# Pixel Bar v0.2 (built by GitHub Actions)
 
-Build (Linux, JDK 17 + Android SDK 34 installed):
-  1. Open this folder in Android Studio (easiest, it makes the Gradle wrapper for you), or
-  2. gradle wrapper --gradle-version 8.7 && ./gradlew assembleDebug
-  APK: app/build/outputs/apk/debug/app-debug.apk
-
-Install:
-  adb install -r app/build/outputs/apk/debug/app-debug.apk
-
-Setup: open app > Grant phone state > Open accessibility settings > enable "Pixel Bar" > flip the switch in the app.
+Setup order: open app > Grant phone state > enable "Pixel Bar" in Accessibility >
+enable "Pixel Bar" in Notification access > flip the switch in the app.
+Font: Figtree (SIL OFL, see app/src/main/assets/fonts/OFL.txt).

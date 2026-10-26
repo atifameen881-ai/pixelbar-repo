@@ -2,16 +2,18 @@ package dev.anom.pixelbar
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Bitmap
 import kotlinx.coroutines.flow.MutableStateFlow
 
 data class Config(
     val enabled: Boolean = false,
-    val theme: Int = 0,          // 0 auto, 1 light, 2 dark
+    val bgMode: Int = 0,         // 0 adaptive (matches app colour), 1 system, 2 light, 3 dark
     val clockFormat: Int = 0,    // 0 system, 1 12h, 2 24h
     val showPercent: Boolean = true,
-    val iconScale: Float = 1f,
-    val spacing: Float = 8f,
-    val sidePadding: Float = 16f,
+    val showNotifs: Boolean = true,
+    val iconScale: Float = 1f,   // multiplier on top of the automatic size
+    val spacing: Float = 1f,     // multiplier on the automatic gap
+    val sidePadding: Float = 12f // in "bar units" (1 unit = barHeight/24)
 )
 
 data class Status(
@@ -19,11 +21,24 @@ data class Status(
     val battery: Int = 100,
     val charging: Boolean = false,
     val saver: Boolean = false,
-    val wifi: Int = -1,   // -1 = not connected, 0..4 = level
-    val cell: Int = -1,   // -1 = no service / unknown, 0..4 = level
+    val wifi: Int = -1,   // -1 not connected, 0..4
+    val cell: Int = -1,   // -1 no service / unknown, 0..4
     val alarm: Boolean = false,
     val dnd: Boolean = false,
 )
+
+/** Measured from the real device: bar height, rounded-corner / cutout insets, notch x-range. */
+data class Env(
+    val barH: Int = 0,
+    val startInset: Float = 0f,
+    val endInset: Float = 0f,
+    val cutL: Float = -1f,   // left x of the top cutout, -1 = none
+    val cutR: Float = -1f,
+)
+
+object NotifStore {
+    val icons = MutableStateFlow<List<Bitmap>>(emptyList())
+}
 
 object Prefs {
     private var sp: SharedPreferences? = null
@@ -35,12 +50,13 @@ object Prefs {
         sp = s
         config.value = Config(
             enabled = s.getBoolean("enabled", false),
-            theme = s.getInt("theme", 0),
+            bgMode = s.getInt("bgmode", 0),
             clockFormat = s.getInt("clock", 0),
             showPercent = s.getBoolean("pct", true),
+            showNotifs = s.getBoolean("notifs", true),
             iconScale = s.getFloat("scale", 1f),
-            spacing = s.getFloat("spacing", 8f),
-            sidePadding = s.getFloat("pad", 16f),
+            spacing = s.getFloat("spacing_m", 1f),
+            sidePadding = s.getFloat("pad_u", 12f),
         )
     }
 
@@ -49,12 +65,13 @@ object Prefs {
         config.value = n
         sp?.edit()
             ?.putBoolean("enabled", n.enabled)
-            ?.putInt("theme", n.theme)
+            ?.putInt("bgmode", n.bgMode)
             ?.putInt("clock", n.clockFormat)
             ?.putBoolean("pct", n.showPercent)
+            ?.putBoolean("notifs", n.showNotifs)
             ?.putFloat("scale", n.iconScale)
-            ?.putFloat("spacing", n.spacing)
-            ?.putFloat("pad", n.sidePadding)
+            ?.putFloat("spacing_m", n.spacing)
+            ?.putFloat("pad_u", n.sidePadding)
             ?.apply()
     }
 }
