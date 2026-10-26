@@ -7,10 +7,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 
 data class Config(
     val enabled: Boolean = false,
-    val bgMode: Int = 0,         // 0 adaptive (matches app colour), 1 system, 2 light, 3 dark
+    val bgMode: Int = 0,         // 0 blend (looks transparent), 1 solid match, 2 system, 3 light, 4 dark
     val clockFormat: Int = 0,    // 0 system, 1 12h, 2 24h
     val showPercent: Boolean = true,
-    val showNotifs: Boolean = true,
+    val notifMode: Int = 0,      // 0 all, 1 priority only, 2 none
+    val hideFullscreen: Boolean = false,
     val iconScale: Float = 1f,   // multiplier on top of the automatic size
     val spacing: Float = 1f,     // multiplier on the automatic gap
     val sidePadding: Float = 12f // in "bar units" (1 unit = barHeight/24)
@@ -25,6 +26,8 @@ data class Status(
     val cell: Int = -1,   // -1 no service / unknown, 0..4
     val alarm: Boolean = false,
     val dnd: Boolean = false,
+    val locked: Boolean = false,
+    val carrier: String = "",
 )
 
 /** Measured from the real device: bar height, rounded-corner / cutout insets, notch x-range. */
@@ -36,8 +39,11 @@ data class Env(
     val cutR: Float = -1f,
 )
 
+class NotifIcon(val bmp: Bitmap, val priority: Boolean)
+
 object NotifStore {
-    val icons = MutableStateFlow<List<Bitmap>>(emptyList())
+    val icons = MutableStateFlow<List<NotifIcon>>(emptyList())
+    val connected = MutableStateFlow(false)
 }
 
 object Prefs {
@@ -50,10 +56,11 @@ object Prefs {
         sp = s
         config.value = Config(
             enabled = s.getBoolean("enabled", false),
-            bgMode = s.getInt("bgmode", 0),
+            bgMode = s.getInt("bg2", 0),
             clockFormat = s.getInt("clock", 0),
             showPercent = s.getBoolean("pct", true),
-            showNotifs = s.getBoolean("notifs", true),
+            notifMode = s.getInt("notif_mode", 0),
+            hideFullscreen = s.getBoolean("hide_fs", false),
             iconScale = s.getFloat("scale", 1f),
             spacing = s.getFloat("spacing_m", 1f),
             sidePadding = s.getFloat("pad_u", 12f),
@@ -65,10 +72,11 @@ object Prefs {
         config.value = n
         sp?.edit()
             ?.putBoolean("enabled", n.enabled)
-            ?.putInt("bgmode", n.bgMode)
+            ?.putInt("bg2", n.bgMode)
             ?.putInt("clock", n.clockFormat)
             ?.putBoolean("pct", n.showPercent)
-            ?.putBoolean("notifs", n.showNotifs)
+            ?.putInt("notif_mode", n.notifMode)
+            ?.putBoolean("hide_fs", n.hideFullscreen)
             ?.putFloat("scale", n.iconScale)
             ?.putFloat("spacing_m", n.spacing)
             ?.putFloat("pad_u", n.sidePadding)

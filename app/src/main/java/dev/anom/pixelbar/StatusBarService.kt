@@ -7,15 +7,17 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
 import android.view.Gravity
 import android.view.RoundedCorner
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
@@ -27,23 +29,48 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlin.math.max
+import kotlin.math.min
 
 class StatusBarService : AccessibilityService() {
     private var wm: WindowManager? = null
+    private var dm: DisplayManager? = null
     private var view: StatusBarView? = null
     private var monitor: StatusMonitor? = null
     private var scope: CoroutineScope? = null
     private var env = Env()
 
     private val handler = Handler(Looper.getMainLooper())
-    private var pending = false
     private var lastShot = 0L
-    private var lastAdaptive: Int? = null
+
+    // last sampled backdrop, kept so a rebuilt window (rotation) is never blank
+    private var lastBlur: Bitmap? = null
+    private var lastAvg: Int? = null
+
+    private var screenOn = true
+    private var sysBarVisible = true
+    private var lastRotation = -1
+
+    private val sampleTask = Runnable { sample() }
+    private val settleTask = Runnable { sample() }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == Display.DEFAULT_DISPLAY) onDisplayStateChanged()
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         Prefs.init(this)
         wm = getSystemService(WindowManager::class.java)
+        dm = getSystemService(DisplayManager::class.java)
+        dm?.registerDisplayListener(displayListener, handler)
+        dm?.getDisplay(Display.DEFAULT_DISPLAY)?.let {
+            screenOn = it.state == Display.STATE_ON
+            lastRotation = it.rotation
+        }
         val m = StatusMonitor(this).also { it.start() }
         monitor = m
         val sc = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -54,22 +81,41 @@ class StatusBarService : AccessibilityService() {
         }
     }
 
-    private fun render(c: Config, s: Status, n: List<Bitmap>) {
+    private fun render(c: Config, s: Status, n: List<NotifIcon>) {
         if (!c.enabled) { detach(); return }
         var v = view
         if (v == null) {
             v = StatusBarView(this)
             attach(v)
             if (view == null) return
-            if (c.bgMode == 0) schedule()
+            requestSample()
         }
         v.update(c, s, n, env)
-        if (c.bgMode == 0) {
-            v.setAdaptiveColor(lastAdaptive)
-            if (lastAdaptive == null) schedule()
+        if (c.bgMode <= 1) {
+            if (lastAvg != null) v.setBackdrop(if (c.bgMode == 0) lastBlur else null, lastAvg)
         } else {
-            v.setAdaptiveColor(null)
+            v.setBackdrop(null, null)
         }
+        applyVisibility()
+    }
+
+    /** Hidden on AOD / screen off, and (optionally) in fullscreen apps where the real bar is hidden. */
+    private fun applyVisibility() {
+        val v = view ?: return
+        val hideFs = Prefs.config.value.hideFullscreen
+        val show = screenOn && (!hideFs || sysBarVisible)
+        v.visibility = if (show) View.VISIBLE else View.INVISIBLE
+    }
+
+    private fun onDisplayStateChanged() {
+        val d = dm?.getDisplay(Display.DEFAULT_DISPLAY) ?: return
+        screenOn = d.state == Display.STATE_ON
+        if (d.rotation != lastRotation) {
+            lastRotation = d.rotation
+            rebuild()
+        }
+        applyVisibility()
+        if (screenOn) { monitor?.refresh(); requestSample() }
     }
 
     /** Read real bar height, rounded corners and notch from the device instead of guessing. */
@@ -115,6 +161,9 @@ class StatusBarService : AccessibilityService() {
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             title = "PixelBar"
         }
+        v.onStatusBarVisible = { vis ->
+            if (vis != sysBarVisible) { sysBarVisible = vis; applyVisibility() }
+        }
         try {
             wm?.addView(v, lp)
             view = v
@@ -124,33 +173,43 @@ class StatusBarService : AccessibilityService() {
     }
 
     private fun detach() {
-        handler.removeCallbacksAndMessages(null)
-        pending = false
+        handler.removeCallbacks(sampleTask)
+        handler.removeCallbacks(settleTask)
         view?.let { try { wm?.removeView(it) } catch (_: Exception) { } }
         view = null
     }
 
-    // ---- adaptive background: sample the row of pixels just below the bar ----
+    private fun rebuild() {
+        detach()
+        val m = monitor ?: return
+        render(Prefs.config.value, m.state.value, NotifStore.icons.value)
+    }
+
+    // ---- backdrop: screenshot, mirror the strip just below the bar, blur it ----
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         val c = Prefs.config.value
-        if (!c.enabled || c.bgMode != 0) return
-        schedule()
+        if (!c.enabled) return
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) monitor?.refresh()  // lockscreen / unlock
+        if (c.bgMode <= 1) requestSample()
     }
 
-    private fun schedule() {
-        if (pending) return
-        pending = true
-        val wait = (lastShot + 800 - SystemClock.uptimeMillis()).coerceAtLeast(250)
-        handler.postDelayed({ pending = false; sample() }, wait)
+    /** Leading sample as soon as the 350 ms screenshot limit allows, plus one trailing sample after things settle. */
+    private fun requestSample() {
+        val now = SystemClock.uptimeMillis()
+        handler.removeCallbacks(sampleTask)
+        val at = max(now + 40, lastShot + 350)
+        handler.postDelayed(sampleTask, at - now)
+        handler.removeCallbacks(settleTask)
+        handler.postDelayed(settleTask, 450)
     }
 
     private fun sample() {
-        if (view == null) return
-        val pm = getSystemService(PowerManager::class.java)
-        if (!pm.isInteractive) return
-        lastShot = SystemClock.uptimeMillis()
+        if (view == null || !screenOn) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastShot < 340) { handler.postDelayed(sampleTask, 340 - (now - lastShot)); return }
+        lastShot = now
         try {
             takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
                 override fun onSuccess(screenshot: ScreenshotResult) { handleShot(screenshot) }
@@ -162,37 +221,44 @@ class StatusBarService : AccessibilityService() {
     }
 
     private fun handleShot(r: ScreenshotResult) {
-        var color: Int? = null
+        var blur: Bitmap? = null
+        var avg: Int? = null
         try {
             val hb = r.hardwareBuffer
             val hw = Bitmap.wrapHardwareBuffer(hb, r.colorSpace)
-            if (hw != null) {
-                val soft = hw.copy(Bitmap.Config.ARGB_8888, false)
-                hw.recycle()
-                if (soft != null) {
-                    color = averageStrip(soft, env.barH + 2)
-                    soft.recycle()
-                }
-            }
+            val soft = hw?.copy(Bitmap.Config.ARGB_8888, false)
+            hw?.recycle()
             hb.close()
+            if (soft != null) {
+                val h = env.barH.coerceAtLeast(1)
+                val y0 = min(h, soft.height - 1)
+                val sh = min(h, soft.height - y0).coerceAtLeast(1)
+                val strip = Bitmap.createBitmap(soft, 0, y0, soft.width, sh)
+                val flip = Matrix().apply { preScale(1f, -1f) }
+                val mirrored = Bitmap.createBitmap(strip, 0, 0, strip.width, strip.height, flip, false)
+                val small = Bitmap.createScaledBitmap(
+                    mirrored, max(soft.width / 12, 8), max(sh / 4, 2), true
+                )
+                avg = averageOf(small)
+                blur = small
+            }
         } catch (e: Exception) {
             Log.e("PixelBar", "handleShot", e)
         }
-        if (color != null) {
-            lastAdaptive = color
-            if (Prefs.config.value.bgMode == 0) view?.setAdaptiveColor(color)
-        }
+        val a = avg ?: return
+        lastAvg = a
+        lastBlur = blur
+        val c = Prefs.config.value
+        if (c.bgMode <= 1) view?.setBackdrop(if (c.bgMode == 0) blur else null, a)
     }
 
-    private fun averageStrip(b: Bitmap, y0: Int): Int {
-        val y = y0.coerceIn(0, b.height - 1)
-        val n = 12
+    private fun averageOf(b: Bitmap): Int {
+        val w = b.width; val h = b.height
+        val px = IntArray(w * h)
+        b.getPixels(px, 0, w, 0, 0, w, h)
         var r = 0L; var g = 0L; var bl = 0L
-        for (i in 0 until n) {
-            val x = ((i + 0.5f) / n * b.width).toInt().coerceIn(0, b.width - 1)
-            val px = b.getPixel(x, y)
-            r += Color.red(px); g += Color.green(px); bl += Color.blue(px)
-        }
+        for (p in px) { r += Color.red(p); g += Color.green(p); bl += Color.blue(p) }
+        val n = px.size.coerceAtLeast(1)
         return Color.rgb((r / n).toInt(), (g / n).toInt(), (bl / n).toInt())
     }
 
@@ -200,14 +266,12 @@ class StatusBarService : AccessibilityService() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // rotation / dark-mode / display-size change: bar height and notch move, rebuild the window
-        detach()
-        val m = monitor ?: return
-        render(Prefs.config.value, m.state.value, NotifStore.icons.value)
+        rebuild()   // rotation / dark mode / display size: bar height and notch move
     }
 
     private fun cleanup() {
         detach()
+        try { dm?.unregisterDisplayListener(displayListener) } catch (_: Exception) { }
         monitor?.stop(); monitor = null
         scope?.cancel(); scope = null
     }

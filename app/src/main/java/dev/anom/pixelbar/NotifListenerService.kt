@@ -11,8 +11,11 @@ import android.service.notification.StatusBarNotification
 /** Only used to read the small icons of active notifications so the bar can show them. Nothing is stored or sent. */
 class NotifListenerService : NotificationListenerService() {
 
-    override fun onListenerConnected() = rebuild()
-    override fun onListenerDisconnected() { NotifStore.icons.value = emptyList() }
+    override fun onListenerConnected() { NotifStore.connected.value = true; rebuild() }
+    override fun onListenerDisconnected() {
+        NotifStore.connected.value = false
+        NotifStore.icons.value = emptyList()
+    }
     override fun onNotificationPosted(sbn: StatusBarNotification?) = rebuild()
     override fun onNotificationRemoved(sbn: StatusBarNotification?) = rebuild()
     override fun onNotificationRankingUpdate(rankingMap: RankingMap?) = rebuild()
@@ -22,14 +25,14 @@ class NotifListenerService : NotificationListenerService() {
         val ranking = try { currentRanking } catch (e: Exception) { null }
         val rk = Ranking()
         val seen = HashSet<String>()
-        val out = ArrayList<Bitmap>()
+        val out = ArrayList<NotifIcon>()
         for (sbn in list.sortedByDescending { it.postTime }) {
-            // like the real bar: silent notifications don't get a status bar icon
-            if (ranking != null && ranking.getRanking(sbn.key, rk) &&
-                rk.importance < NotificationManager.IMPORTANCE_DEFAULT) continue
+            var importance = NotificationManager.IMPORTANCE_DEFAULT
+            if (ranking != null && ranking.getRanking(sbn.key, rk)) importance = rk.importance
+            if (importance < NotificationManager.IMPORTANCE_LOW) continue   // minimized/none: never in the bar
             if (!seen.add(sbn.packageName)) continue
             val bmp = toBitmap(sbn) ?: continue
-            out.add(bmp)
+            out.add(NotifIcon(bmp, importance >= NotificationManager.IMPORTANCE_DEFAULT))
             if (out.size >= 8) break
         }
         NotifStore.icons.value = out

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
+import android.service.notification.NotificationListenerService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -95,11 +96,17 @@ fun Screen() {
     var a11y by remember { mutableStateOf(a11yOn(ctx)) }
     var phone by remember { mutableStateOf(phoneOk(ctx)) }
     var notifAccess by remember { mutableStateOf(notifOk(ctx)) }
+    val connected by NotifStore.connected.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val o = LifecycleEventObserver { _, e ->
             if (e == Lifecycle.Event.ON_RESUME) {
                 a11y = a11yOn(ctx); phone = phoneOk(ctx); notifAccess = notifOk(ctx); monitor.refresh()
+                if (notifAccess) {
+                    try {
+                        NotificationListenerService.requestRebind(ComponentName(ctx, NotifListenerService::class.java))
+                    } catch (_: Exception) { }
+                }
             }
         }
         lifecycle.addObserver(o)
@@ -124,7 +131,7 @@ fun Screen() {
                 modifier = Modifier.fillMaxWidth().height(hDp).clip(RoundedCornerShape(8.dp))
             )
             Text(
-                "The preview can't sample your apps, so Adaptive shows system light/dark here. On the real bar it matches the app underneath.",
+                "The preview can't see your apps, so Blend/Solid show system light/dark here. On the real bar they follow whatever is under it.",
                 style = MaterialTheme.typography.bodySmall
             )
 
@@ -168,10 +175,17 @@ fun Screen() {
                 Switch(checked = cfg.showPercent, onCheckedChange = { on -> Prefs.update { it.copy(showPercent = on) } })
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Notification icons", Modifier.weight(1f))
-                Switch(checked = cfg.showNotifs, onCheckedChange = { on -> Prefs.update { it.copy(showNotifs = on) } })
+                Text("Hide in fullscreen apps (test with YouTube)", Modifier.weight(1f))
+                Switch(checked = cfg.hideFullscreen, onCheckedChange = { on -> Prefs.update { it.copy(hideFullscreen = on) } })
             }
-            ChipRow("Background", listOf("Adaptive", "System", "Light", "Dark"), cfg.bgMode) { i -> Prefs.update { it.copy(bgMode = i) } }
+            ChipRow("Background", listOf("Blend", "Solid", "System", "Light", "Dark"), cfg.bgMode) { i -> Prefs.update { it.copy(bgMode = i) } }
+            ChipRow("Notification icons", listOf("All", "Priority", "None"), cfg.notifMode) { i -> Prefs.update { it.copy(notifMode = i) } }
+            Text(
+                "Notification access: " + (if (notifAccess) "granted" else "NOT granted") +
+                    ", listener " + (if (connected) "connected" else "not connected") +
+                    ", icons found: " + notifs.size,
+                style = MaterialTheme.typography.bodySmall
+            )
             ChipRow("Clock", listOf("System", "12h", "24h"), cfg.clockFormat) { i -> Prefs.update { it.copy(clockFormat = i) } }
             SliderRow("Icon size (auto-scaled to your bar)", cfg.iconScale, 0.7f..1.4f) { v -> Prefs.update { it.copy(iconScale = v) } }
             SliderRow("Icon spacing", cfg.spacing, 0.5f..2f) { v -> Prefs.update { it.copy(spacing = v) } }

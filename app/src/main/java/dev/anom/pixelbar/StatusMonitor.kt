@@ -2,6 +2,7 @@ package dev.anom.pixelbar
 
 import android.Manifest
 import android.app.AlarmManager
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -37,6 +38,7 @@ class StatusMonitor(context: Context) {
     private val pm = ctx.getSystemService(PowerManager::class.java)
     private val am = ctx.getSystemService(AlarmManager::class.java)
     private val nm = ctx.getSystemService(NotificationManager::class.java)
+    private val km = ctx.getSystemService(KeyguardManager::class.java)
     private val exec = ContextCompat.getMainExecutor(ctx)
 
     private var started = false
@@ -96,6 +98,9 @@ class StatusMonitor(context: Context) {
             addAction(Intent.ACTION_TIME_TICK)
             addAction(Intent.ACTION_TIME_CHANGED)
             addAction(Intent.ACTION_TIMEZONE_CHANGED)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_USER_PRESENT)
             addAction(AlarmManager.ACTION_NEXT_ALARM_CLOCK_CHANGED)
             addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)
         }
@@ -137,6 +142,8 @@ class StatusMonitor(context: Context) {
                 alarm = am.nextAlarmClock != null,
                 dnd = f != NotificationManager.INTERRUPTION_FILTER_ALL &&
                       f != NotificationManager.INTERRUPTION_FILTER_UNKNOWN,
+                locked = km.isKeyguardLocked,
+                carrier = tm.networkOperatorName ?: "",
             )
         }
     }

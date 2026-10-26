@@ -15,6 +15,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.format.DateFormat
 import android.view.View
+import android.view.WindowInsets
 import androidx.core.graphics.ColorUtils
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -31,10 +32,18 @@ import kotlin.math.min
 class StatusBarView(context: Context) : View(context) {
     private var config = Config()
     private var status = Status()
-    private var notifs: List<Bitmap> = emptyList()
+    private var notifs: List<NotifIcon> = emptyList()
     private var env = Env()
-    private var adaptive: Int? = null
+    private var adaptive: Int? = null      // average colour of the backdrop (drives icon colour)
+    private var bmp: Bitmap? = null        // blurred mirrored strip from just below the bar
+    private var prevBmp: Bitmap? = null
+    private var fade = 1f
     private var anim: ValueAnimator? = null
+    private val bgPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val full = RectF()
+
+    /** Reports whether the real status bar is visible (false in fullscreen apps). */
+    var onStatusBarVisible: ((Boolean) -> Unit)? = null
 
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private val bp = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -57,22 +66,39 @@ class StatusBarView(context: Context) : View(context) {
         return t ?: Typeface.create("sans-serif-medium", Typeface.NORMAL)
     }
 
-    fun update(c: Config, s: Status, n: List<Bitmap>, e: Env) {
+    fun update(c: Config, s: Status, n: List<NotifIcon>, e: Env) {
         config = c; status = s; notifs = n; env = e
         invalidate()
     }
 
-    /** Colour sampled from the app below the bar. null = fall back to system light/dark. */
-    fun setAdaptiveColor(target: Int?) {
+    /** blurred = mirrored strip below the bar (blend mode), solid = its average colour. Both null = system theme. */
+    private var targetSolid: Int? = null
+
+    fun setBackdrop(blurred: Bitmap?, solid: Int?) {
+        if (blurred === bmp && solid == targetSolid) return   // nothing new, don't restart the fade
+        targetSolid = solid
         anim?.cancel()
-        if (target == null) { adaptive = null; invalidate(); return }
-        val from = adaptive ?: target
-        if (from == target) { adaptive = target; invalidate(); return }
-        anim = ValueAnimator.ofArgb(from, target).apply {
-            duration = 180
-            addUpdateListener { adaptive = it.animatedValue as Int; invalidate() }
+        val fromColor = adaptive ?: solid
+        prevBmp = bmp
+        bmp = blurred
+        if (solid == null || fromColor == null) {
+            adaptive = solid; fade = 1f; invalidate(); return
+        }
+        anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 140
+            addUpdateListener {
+                val t = it.animatedValue as Float
+                fade = t
+                adaptive = ColorUtils.blendARGB(fromColor, solid, t)
+                invalidate()
+            }
             start()
         }
+    }
+
+    override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
+        onStatusBarVisible?.invoke(insets.isVisible(WindowInsets.Type.statusBars()))
+        return super.onApplyWindowInsets(insets)
     }
 
     private fun paint(
@@ -98,26 +124,39 @@ class StatusBarView(context: Context) : View(context) {
         val sysNight = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
                 Configuration.UI_MODE_NIGHT_YES
         val sysBg = if (sysNight) Color.BLACK else Color.WHITE
-        val bg = when (config.bgMode) {
-            2 -> Color.WHITE
-            3 -> Color.BLACK
-            1 -> sysBg
+        val baseBg = when (config.bgMode) {
+            3 -> Color.WHITE
+            4 -> Color.BLACK
+            2 -> sysBg
             else -> adaptive ?: sysBg
         }
-        val fg = onColor(bg)
-        c.drawColor(bg)
+        val fg = onColor(baseBg)
+        c.drawColor(baseBg)
+        if (config.bgMode == 0) {
+            val cur = bmp
+            if (cur != null) {
+                full.set(0f, 0f, width.toFloat(), height.toFloat())
+                val pv = prevBmp
+                if (pv != null && fade < 1f) {
+                    bgPaint.alpha = 255
+                    c.drawBitmap(pv, null, full, bgPaint)
+                }
+                bgPaint.alpha = (255 * fade).toInt().coerceIn(0, 255)
+                c.drawBitmap(cur, null, full, bgPaint)
+            }
+        }
+        val bg = baseBg
 
         val h = height.toFloat()
         val unit = h / 24f
         val u = unit * config.iconScale
         val gap = 6.5f * u * config.spacing
         val minPad = config.sidePadding * unit
-        val startPad = max(minPad, env.startInset)
-        val endPad = max(minPad, env.endInset)
+        val pad = max(minPad, max(env.startInset, env.endInset))   // same on both sides
         val cy = h / 2f
 
         // right group, drawn right-to-left
-        var x = width - endPad
+        var x = width - pad
         x = drawBattery(c, x, cy, u, fg, bg)
         x -= gap
         x = drawSignal(c, x, cy, u, fg)
@@ -125,13 +164,40 @@ class StatusBarView(context: Context) : View(context) {
         if (status.dnd) { x -= gap; x = drawDnd(c, x, cy, u, fg) }
         if (status.alarm) { x -= gap; x = drawAlarm(c, x, cy, u, fg) }
 
-        // left group: clock + notification icons, never into the notch or the right group
+        // left group: clock + notification icons (lockscreen: carrier name), never into the notch or the right group
         var limit = x - gap
-        if (env.cutL >= 0f) limit = min(limit, env.cutL - 3f * u)
-        val clockEnd = drawClock(c, startPad, cy, u, fg)
-        if (config.showNotifs && notifs.isNotEmpty()) {
-            drawNotifs(c, clockEnd + 5f * u, cy, u, fg, limit)
+        if (env.cutL >= 0f && env.cutL > pad + 8f * u) limit = min(limit, env.cutL - 3f * u)
+        if (status.locked && status.carrier.isNotBlank()) {
+            drawCarrier(c, pad, cy, u, fg, limit)
+            return
         }
+        val clockEnd = drawClock(c, pad, cy, u, fg)
+        val list = when (config.notifMode) {
+            0 -> notifs
+            1 -> notifs.filter { it.priority }
+            else -> emptyList()
+        }
+        if (list.isNotEmpty() && !status.locked) {
+            var startX = clockEnd + 5f * u
+            var areaEnd = limit
+            if (env.cutL >= 0f) {
+                if (env.cutR <= startX) { /* notch is behind the clock, ignore */ }
+                else if (env.cutL > startX) areaEnd = min(areaEnd, env.cutL - 3f * u)
+                else startX = env.cutR + 3f * u
+            }
+            drawNotifs(c, list, startX, cy, u, fg, areaEnd)
+        }
+    }
+
+    private fun drawCarrier(c: Canvas, x: Float, cy: Float, u: Float, fg: Int, limit: Float) {
+        paint(fg)
+        p.typeface = faceClock
+        p.textSize = 12.5f * u
+        p.getTextBounds("0", 0, 1, tb)
+        val base = cy - tb.exactCenterY()
+        val txt = status.carrier
+        val n = p.breakText(txt, true, max(limit - x, 0f), null)
+        if (n > 0) c.drawText(txt, 0, n, x, base, p)
     }
 
     private fun drawClock(c: Canvas, x: Float, cy: Float, u: Float, fg: Int): Float {
@@ -151,11 +217,11 @@ class StatusBarView(context: Context) : View(context) {
         return x + p.measureText(txt)
     }
 
-    private fun drawNotifs(c: Canvas, startX: Float, cy: Float, u: Float, fg: Int, limit: Float) {
+    private fun drawNotifs(c: Canvas, list: List<NotifIcon>, startX: Float, cy: Float, u: Float, fg: Int, limit: Float) {
         val sz = 14f * u
         val g = 3.5f * u
         val step = sz + g
-        val n = notifs.size
+        val n = list.size
         val maxFit = floor((limit - startX + g) / step).toInt()
         if (maxFit <= 0) return
         val show = if (n <= maxFit) n else max(maxFit - 1, 0)
@@ -163,7 +229,7 @@ class StatusBarView(context: Context) : View(context) {
         var x = startX
         for (i in 0 until show) {
             dst.set(x, cy - sz / 2, x + sz, cy + sz / 2)
-            c.drawBitmap(notifs[i], null, dst, bp)
+            c.drawBitmap(list[i].bmp, null, dst, bp)
             x += step
         }
         if (n > show) c.drawCircle(x + 2.5f * u, cy, 2f * u, paint(fg))

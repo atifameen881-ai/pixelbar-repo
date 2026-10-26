@@ -1,4 +1,4 @@
-# Pixel Bar v0.2 (built by GitHub Actions)
+# Pixel Bar v0.3 (built by GitHub Actions)
 
 Setup order: open app > Grant phone state > enable "Pixel Bar" in Accessibility >
 enable "Pixel Bar" in Notification access > flip the switch in the app.
