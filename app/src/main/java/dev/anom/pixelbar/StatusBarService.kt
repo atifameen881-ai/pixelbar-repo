@@ -36,6 +36,7 @@ class StatusBarService : AccessibilityService() {
     private var dm: DisplayManager? = null
     private var view: StatusBarView? = null
     private var monitor: StatusMonitor? = null
+    private var hider: IconHider? = null
     private var scope: CoroutineScope? = null
     private var env = Env()
 
@@ -71,6 +72,7 @@ class StatusBarService : AccessibilityService() {
             screenOn = it.state == Display.STATE_ON
             lastRotation = it.rotation
         }
+        hider = IconHider(this)
         val m = StatusMonitor(this).also { it.start() }
         monitor = m
         val sc = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -81,7 +83,11 @@ class StatusBarService : AccessibilityService() {
         }
     }
 
-    private fun render(c: Config, s: Status, n: List<NotifIcon>) {
+    private fun render(c0: Config, s: Status, n: List<NotifIcon>) {
+        val canHide = IconHider.canWrite(this)
+        hider?.sync(c0.enabled && c0.bgMode == 1 && canHide)
+        // transparent mode without the ADB grant would double-draw icons, so fall back to Auto
+        val c = if (c0.bgMode == 1 && !canHide) c0.copy(bgMode = 0) else c0
         if (!c.enabled) { detach(); return }
         var v = view
         if (v == null) {
@@ -271,6 +277,7 @@ class StatusBarService : AccessibilityService() {
 
     private fun cleanup() {
         detach()
+        hider?.sync(false); hider = null
         try { dm?.unregisterDisplayListener(displayListener) } catch (_: Exception) { }
         monitor?.stop(); monitor = null
         scope?.cancel(); scope = null

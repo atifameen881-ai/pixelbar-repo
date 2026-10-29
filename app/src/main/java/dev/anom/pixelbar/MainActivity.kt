@@ -9,6 +9,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
+import android.view.WindowManager
+import android.view.RoundedCorner
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import android.service.notification.NotificationListenerService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -81,6 +87,19 @@ private fun a11yOn(ctx: Context): Boolean {
 private fun phoneOk(ctx: Context) =
     ctx.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
 
+private fun debugInfo(ctx: Context): String = try {
+    val wmgr = ctx.getSystemService(WindowManager::class.java)
+    val m = wmgr.currentWindowMetrics
+    val wi = m.windowInsets
+    val bar = wi.getInsetsIgnoringVisibility(android.view.WindowInsets.Type.statusBars()).top
+    val cut = wi.displayCutout?.boundingRectTop
+    val rl = wi.getRoundedCorner(RoundedCorner.POSITION_TOP_LEFT)?.radius ?: 0
+    val rr = wi.getRoundedCorner(RoundedCorner.POSITION_TOP_RIGHT)?.radius ?: 0
+    "screen ${m.bounds.width()}x${m.bounds.height()}, density ${ctx.resources.displayMetrics.density}, " +
+        "bar inset ${bar}px, bar resource ${ctx.statusBarHeightPx()}px, " +
+        "notch ${if (cut == null || cut.isEmpty) "none" else cut.toShortString()}, corners L$rl R$rr"
+} catch (e: Exception) { "debug unavailable: ${e.message}" }
+
 private fun notifOk(ctx: Context) =
     NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(ctx.packageName)
 
@@ -96,12 +115,13 @@ fun Screen() {
     var a11y by remember { mutableStateOf(a11yOn(ctx)) }
     var phone by remember { mutableStateOf(phoneOk(ctx)) }
     var notifAccess by remember { mutableStateOf(notifOk(ctx)) }
+    var canHide by remember { mutableStateOf(IconHider.canWrite(ctx)) }
     val connected by NotifStore.connected.collectAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val o = LifecycleEventObserver { _, e ->
             if (e == Lifecycle.Event.ON_RESUME) {
-                a11y = a11yOn(ctx); phone = phoneOk(ctx); notifAccess = notifOk(ctx); monitor.refresh()
+                a11y = a11yOn(ctx); phone = phoneOk(ctx); notifAccess = notifOk(ctx); canHide = IconHider.canWrite(ctx); monitor.refresh()
                 if (notifAccess) {
                     try {
                         NotificationListenerService.requestRebind(ComponentName(ctx, NotifListenerService::class.java))
@@ -125,11 +145,16 @@ fun Screen() {
             Text("Live preview", style = MaterialTheme.typography.titleSmall)
             val barPx = ctx.statusBarHeightPx()
             val hDp = with(LocalDensity.current) { barPx.toDp() }
-            AndroidView(
-                factory = { StatusBarView(it) },
-                update = { it.update(cfg, status, notifs, Env(barH = barPx)) },
-                modifier = Modifier.fillMaxWidth().height(hDp).clip(RoundedCornerShape(8.dp))
-            )
+            Box(
+                Modifier.fillMaxWidth().height(hDp).clip(RoundedCornerShape(8.dp))
+                    .background(Brush.horizontalGradient(listOf(Color(0xFF2E4A7D), Color(0xFF7A5C9E), Color(0xFFD98C5F))))
+            ) {
+                AndroidView(
+                    factory = { StatusBarView(it) },
+                    update = { it.update(cfg, status, notifs, Env(barH = barPx)) },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
             Text(
                 "The preview can't see your apps, so Blend/Solid show system light/dark here. On the real bar they follow whatever is under it.",
                 style = MaterialTheme.typography.bodySmall
@@ -178,7 +203,24 @@ fun Screen() {
                 Text("Hide in fullscreen apps (test with YouTube)", Modifier.weight(1f))
                 Switch(checked = cfg.hideFullscreen, onCheckedChange = { on -> Prefs.update { it.copy(hideFullscreen = on) } })
             }
-            ChipRow("Background", listOf("Blend", "Solid", "System", "Light", "Dark"), cfg.bgMode) { i -> Prefs.update { it.copy(bgMode = i) } }
+            val bgModes = listOf(0, 1, 3, 4)
+            ChipRow("Background", listOf("Auto", "Transparent", "Light", "Dark"), bgModes.indexOf(cfg.bgMode).coerceAtLeast(0)) { i ->
+                Prefs.update { it.copy(bgMode = bgModes[i]) }
+            }
+            if (cfg.bgMode == 1 && !canHide) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Transparent needs a one-time grant, otherwise the bar stays on Auto. On your PC with the phone connected over ADB run:")
+                        Text("adb shell pm grant dev.anom.pixelbar android.permission.WRITE_SECURE_SETTINGS", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+            if (cfg.bgMode == 1 && canHide) {
+                Text(
+                    "Transparent is active: stock Wi-Fi, signal, battery, bluetooth, mute and similar icons are hidden through a system setting and redrawn by Pixel Bar. Clock and notification icons stay stock. If icons ever go missing, run: adb shell settings delete secure icon_blacklist",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
             ChipRow("Notification icons", listOf("All", "Priority", "None"), cfg.notifMode) { i -> Prefs.update { it.copy(notifMode = i) } }
             Text(
                 "Notification access: " + (if (notifAccess) "granted" else "NOT granted") +
@@ -190,6 +232,8 @@ fun Screen() {
             SliderRow("Icon size (auto-scaled to your bar)", cfg.iconScale, 0.7f..1.4f) { v -> Prefs.update { it.copy(iconScale = v) } }
             SliderRow("Icon spacing", cfg.spacing, 0.5f..2f) { v -> Prefs.update { it.copy(spacing = v) } }
             SliderRow("Side padding", cfg.sidePadding, 2f..30f) { v -> Prefs.update { it.copy(sidePadding = v) } }
+            SliderRow("Vertical nudge", cfg.yOffset, -6f..6f) { v -> Prefs.update { it.copy(yOffset = v) } }
+            Text("Debug: " + debugInfo(ctx), style = MaterialTheme.typography.bodySmall)
 
             Spacer(Modifier.height(8.dp))
             Text(

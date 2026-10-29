@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
+import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -131,7 +132,8 @@ class StatusBarView(context: Context) : View(context) {
             else -> adaptive ?: sysBg
         }
         val fg = onColor(baseBg)
-        c.drawColor(baseBg)
+        val transparent = config.bgMode == 1
+        if (transparent) c.drawColor(0, PorterDuff.Mode.CLEAR) else c.drawColor(baseBg)
         if (config.bgMode == 0) {
             val cur = bmp
             if (cur != null) {
@@ -152,17 +154,24 @@ class StatusBarView(context: Context) : View(context) {
         val u = unit * config.iconScale
         val gap = 6.5f * u * config.spacing
         val minPad = config.sidePadding * unit
-        val pad = max(minPad, max(env.startInset, env.endInset))   // same on both sides
-        val cy = h / 2f
+        val padS = max(minPad, env.startInset)
+        val padE = max(minPad, env.endInset)
+        val land = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        // portrait: identical both sides. landscape: each side clears its own notch / corner.
+        val pad = if (land) padS else max(padS, padE)
+        val padR = if (land) padE else pad
+        val cy = h / 2f + config.yOffset * unit
 
         // right group, drawn right-to-left
-        var x = width - pad
+        var x = width - padR
         x = drawBattery(c, x, cy, u, fg, bg)
         x -= gap
         x = drawSignal(c, x, cy, u, fg)
         if (status.wifi >= 0) { x -= gap; x = drawWifi(c, x, cy, u, fg, bg) }
         if (status.dnd) { x -= gap; x = drawDnd(c, x, cy, u, fg) }
         if (status.alarm) { x -= gap; x = drawAlarm(c, x, cy, u, fg) }
+
+        if (transparent) return   // clock and notification icons stay stock in transparent mode
 
         // left group: clock + notification icons (lockscreen: carrier name), never into the notch or the right group
         var limit = x - gap
@@ -314,7 +323,7 @@ class StatusBarView(context: Context) : View(context) {
         path.lineTo(cx + 0.30f * s, cy - 0.10f * s)
         path.lineTo(cx + 0.02f * s, cy - 0.10f * s)
         path.close()
-        if (halo) c.drawPath(path, paint(bg, 255, Paint.Style.FILL_AND_STROKE, 0.9f * s * 0.2f))
+        if (halo && config.bgMode != 1) c.drawPath(path, paint(bg, 255, Paint.Style.FILL_AND_STROKE, 0.9f * s * 0.2f))
         c.drawPath(path, paint(fg))
     }
 
@@ -369,6 +378,7 @@ class StatusBarView(context: Context) : View(context) {
             rect.set(cx - rr, cyc - rr, cx + rr, cyc + rr)
             val gp = paint(bg, 255, Paint.Style.STROKE, gw)
             gp.strokeCap = Paint.Cap.BUTT
+            if (config.bgMode == 1) gp.xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)  // punch real gaps
             c.drawArc(rect, 225f, 90f, false, gp)
         }
         return left

@@ -7,14 +7,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 
 data class Config(
     val enabled: Boolean = false,
-    val bgMode: Int = 0,         // 0 blend (looks transparent), 1 solid match, 2 system, 3 light, 4 dark
+    val bgMode: Int = 0,         // 0 auto (blend), 1 transparent (needs ADB grant), 2 system, 3 light, 4 dark
     val clockFormat: Int = 0,    // 0 system, 1 12h, 2 24h
     val showPercent: Boolean = true,
     val notifMode: Int = 0,      // 0 all, 1 priority only, 2 none
     val hideFullscreen: Boolean = false,
     val iconScale: Float = 1f,   // multiplier on top of the automatic size
     val spacing: Float = 1f,     // multiplier on the automatic gap
-    val sidePadding: Float = 12f // in "bar units" (1 unit = barHeight/24)
+    val sidePadding: Float = 12f, // in "bar units" (1 unit = barHeight/24)
+    val yOffset: Float = 0f       // vertical nudge in bar units
 )
 
 data class Status(
@@ -64,6 +65,7 @@ object Prefs {
             iconScale = s.getFloat("scale", 1f),
             spacing = s.getFloat("spacing_m", 1f),
             sidePadding = s.getFloat("pad_u", 12f),
+            yOffset = s.getFloat("yoff", 0f),
         )
     }
 
@@ -80,6 +82,7 @@ object Prefs {
             ?.putFloat("scale", n.iconScale)
             ?.putFloat("spacing_m", n.spacing)
             ?.putFloat("pad_u", n.sidePadding)
+            ?.putFloat("yoff", n.yOffset)
             ?.apply()
     }
 }
